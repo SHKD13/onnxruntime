@@ -22,7 +22,7 @@ namespace Microsoft.ML.OnnxRuntime
     /// <summary>
     /// Represents a disposable OrtValue
     /// </summary>
-    public class OrtValue : SafeHandle
+    public class OrtValue : SafeHandle, IOrtValueOwner
     {
         /// <summary>
         /// Use factory methods to instantiate
@@ -65,6 +65,12 @@ namespace Microsoft.ML.OnnxRuntime
         }
 
         internal bool IsOwned { get; private set; }
+
+        /// <summary>
+        /// Implements IOrtValueOwner
+        /// </summary>
+        /// <returns>Returns an non-owning instance of the value</returns>
+        public OrtValue Value { get { return new OrtValue(Handle, false); } }
 
         #endregion
 

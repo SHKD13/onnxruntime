@@ -5,23 +5,27 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using System;
 using System.Buffers;
 using System.Text;
-using System.Threading;
 
 namespace Microsoft.ML.OnnxRuntime
 {
     /// <summary>
-    /// TODO: dmitrism -> Get rid of this class.
-    /// A non-public interface detailing the contract to be honored by NativeOnnxTensorMemory
+    /// Provides access from the underlying object that owns disposable OrtValue
+    /// The returned value does not own the actual memory and does nothing on Dispose()
     /// </summary>
-    internal interface NativeMemoryHandler : IDisposable
+    internal interface IOrtValueOwner : IDisposable
     {
-        IntPtr Handle { get; }
+        OrtValue Value { get; }
     }
 
-    internal class NativeOnnxTensorMemory<T> : MemoryManager<T>, NativeMemoryHandler
+    /// <summary>
+    /// This helper class owns the underlying OrtValue that is assumed to be a Tensor,
+    /// it does not support any other ortValues and caches Tensor properties.
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    internal class NativeOnnxTensorMemory<T> : MemoryManager<T>, IOrtValueOwner
     {
-        private bool _disposed;
-        private IntPtr _onnxValueHandle;      // pointer to onnxvalue object in native
+        private bool _disposed = false;
+        private OrtValue _ortValue; // Disposable
         private IntPtr _dataBufferPointer;    // pointer to mutable tensor data in native memory
         private string[] _dataBufferAsString; // string tensor values copied into managed memory
         private Tensors.TensorElementType _elementType;
@@ -29,14 +33,16 @@ namespace Microsoft.ML.OnnxRuntime
         private int _elementWidth;
         private int[] _dimensions;
 
-        public NativeOnnxTensorMemory(IntPtr onnxValueHandle)
+        /// <summary>
+        /// Constructs an instance and takes ownership of ortValue on success
+        /// </summary>
+        /// <param name="ortValue">ortValue that is a Tensor</param>
+        public NativeOnnxTensorMemory(OrtValue ortValue)
         {
             Type type = null;
             int width = 0;
-            _onnxValueHandle = onnxValueHandle;
-            _disposed = false;
             IntPtr typeAndShape = IntPtr.Zero;
-            NativeApiStatus.VerifySuccess(NativeMethods.OrtGetTensorTypeAndShape(onnxValueHandle, out typeAndShape));
+            NativeApiStatus.VerifySuccess(NativeMethods.OrtGetTensorTypeAndShape(ortValue.Handle, out typeAndShape));
             try
             {
                 TensorElementType elemType;
@@ -77,13 +83,13 @@ namespace Microsoft.ML.OnnxRuntime
 
                 if (typeof(T) != typeof(string))
                 {
-                    NativeApiStatus.VerifySuccess(NativeMethods.OrtGetTensorMutableData(_onnxValueHandle, out _dataBufferPointer));
+                    NativeApiStatus.VerifySuccess(NativeMethods.OrtGetTensorMutableData(ortValue.Handle, out _dataBufferPointer));
                 }
                 else
                 {
                     UIntPtr strLen;
                     var offsets = new UIntPtr[_elementCount];
-                    NativeApiStatus.VerifySuccess(NativeMethods.OrtGetStringTensorDataLength(_onnxValueHandle, out strLen));
+                    NativeApiStatus.VerifySuccess(NativeMethods.OrtGetStringTensorDataLength(_ortValue.Handle, out strLen));
                     var dataBuffer = new byte[strLen.ToUInt64()];
 
                     using (var dataBufferHandle = new Memory<byte>(dataBuffer).Pin())
@@ -94,7 +100,7 @@ namespace Microsoft.ML.OnnxRuntime
                             _dataBufferPointer = (IntPtr)dataBufferHandle.Pointer;
                             NativeApiStatus.VerifySuccess(
                                 NativeMethods.OrtGetStringTensorContent(
-                                _onnxValueHandle, _dataBufferPointer, strLen,
+                                ortValue.Handle, _dataBufferPointer, strLen,
                                 (IntPtr)offsetMemoryHandle.Pointer,
                                 (UIntPtr)_elementCount));
                         }
@@ -110,6 +116,8 @@ namespace Microsoft.ML.OnnxRuntime
                         }
                     }
                 }
+                // Transfer ownership
+                _ortValue = new OrtValue(ortValue.Disown());
             }
             finally
             {
@@ -117,7 +125,11 @@ namespace Microsoft.ML.OnnxRuntime
             }
         }
 
-        public IntPtr Handle { get { return _onnxValueHandle; } }
+        /// <summary>
+        /// Returns a non-owning copy of OrtValue so the
+        /// result can not release native memory
+        /// </summary>
+        public OrtValue Value { get { return new OrtValue(_ortValue.Handle, false); } }
 
         public bool IsDisposed => _disposed;
 
@@ -187,12 +199,11 @@ namespace Microsoft.ML.OnnxRuntime
                 return;
             }
 
-            if (_onnxValueHandle != IntPtr.Zero)
+            if (_ortValue != null)
             {
-                NativeMethods.OrtReleaseValue(_onnxValueHandle);
-                _onnxValueHandle = IntPtr.Zero;
+                _ortValue.Dispose();
+                _ortValue = null;
             }
-
             _disposed = true;
         }
 
